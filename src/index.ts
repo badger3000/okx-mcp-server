@@ -85,7 +85,8 @@ class OKXServer {
       tools: [
         {
           name: "get_price",
-          description: "Get latest price for an OKX instrument",
+          description:
+            "Get latest price for an OKX instrument with formatted visualization",
           inputSchema: {
             type: "object",
             properties: {
@@ -93,13 +94,19 @@ class OKXServer {
                 type: "string",
                 description: "Instrument ID (e.g. BTC-USDT)",
               },
+              format: {
+                type: "string",
+                description: "Output format (json or markdown)",
+                default: "markdown",
+              },
             },
             required: ["instrument"],
           },
         },
         {
           name: "get_candlesticks",
-          description: "Get candlestick data for an OKX instrument",
+          description:
+            "Get candlestick data for an OKX instrument with visualization options",
           inputSchema: {
             type: "object",
             properties: {
@@ -116,6 +123,11 @@ class OKXServer {
                 type: "number",
                 description: "Number of candlesticks (max 100)",
                 default: 100,
+              },
+              format: {
+                type: "string",
+                description: "Output format (json, markdown, or table)",
+                default: "markdown",
               },
             },
             required: ["instrument"],
@@ -137,6 +149,7 @@ class OKXServer {
           instrument: string;
           bar?: string;
           limit?: number;
+          format?: string;
         };
 
         if (!args.instrument) {
@@ -145,6 +158,9 @@ class OKXServer {
             "Missing required parameter: instrument"
           );
         }
+
+        // Default format to markdown if not specified
+        args.format = args.format || "markdown";
 
         if (request.params.name === "get_price") {
           console.error(
@@ -166,27 +182,90 @@ class OKXServer {
           }
 
           const ticker = response.data.data[0];
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(
-                  {
-                    instrument: ticker.instId,
-                    lastPrice: ticker.last,
-                    bid: ticker.bidPx,
-                    ask: ticker.askPx,
-                    high24h: ticker.high24h,
-                    low24h: ticker.low24h,
-                    volume24h: ticker.vol24h,
-                    timestamp: new Date(parseInt(ticker.ts)).toISOString(),
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
+
+          if (args.format === "json") {
+            // Original JSON format
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(
+                    {
+                      instrument: ticker.instId,
+                      lastPrice: ticker.last,
+                      bid: ticker.bidPx,
+                      ask: ticker.askPx,
+                      high24h: ticker.high24h,
+                      low24h: ticker.low24h,
+                      volume24h: ticker.vol24h,
+                      timestamp: new Date(parseInt(ticker.ts)).toISOString(),
+                    },
+                    null,
+                    2
+                  ),
+                },
+              ],
+            };
+          } else {
+            // Enhanced markdown format with visualization elements
+            const priceChange =
+              parseFloat(ticker.last) - parseFloat(ticker.open24h);
+            const priceChangePercent =
+              (priceChange / parseFloat(ticker.open24h)) * 100;
+            const changeSymbol = priceChange >= 0 ? "▲" : "▼";
+            const changeColor = priceChange >= 0 ? "green" : "red";
+
+            // Create price range visual
+            const low24h = parseFloat(ticker.low24h);
+            const high24h = parseFloat(ticker.high24h);
+            const range = high24h - low24h;
+            const currentPrice = parseFloat(ticker.last);
+            const position =
+              Math.min(Math.max((currentPrice - low24h) / range, 0), 1) * 100;
+
+            const priceBar = `Low ${low24h.toFixed(2)} [${"▮".repeat(
+              Math.floor(position / 5)
+            )}|${"▯".repeat(20 - Math.floor(position / 5))}] ${high24h.toFixed(
+              2
+            )} High`;
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `# ${ticker.instId} Price Summary\n\n` +
+                    `## Current Price: $${parseFloat(
+                      ticker.last
+                    ).toLocaleString()}\n\n` +
+                    `**24h Change:** ${changeSymbol} $${Math.abs(
+                      priceChange
+                    ).toLocaleString()} (${
+                      priceChangePercent >= 0 ? "+" : ""
+                    }${priceChangePercent.toFixed(2)}%)\n\n` +
+                    `**Bid:** $${parseFloat(
+                      ticker.bidPx
+                    ).toLocaleString()} | **Ask:** $${parseFloat(
+                      ticker.askPx
+                    ).toLocaleString()}\n\n` +
+                    `### 24-Hour Price Range\n\n` +
+                    `\`\`\`\n${priceBar}\n\`\`\`\n\n` +
+                    `**24h High:** $${parseFloat(
+                      ticker.high24h
+                    ).toLocaleString()}\n` +
+                    `**24h Low:** $${parseFloat(
+                      ticker.low24h
+                    ).toLocaleString()}\n\n` +
+                    `**24h Volume:** ${parseFloat(
+                      ticker.vol24h
+                    ).toLocaleString()} units\n\n` +
+                    `**Last Updated:** ${new Date(
+                      parseInt(ticker.ts)
+                    ).toLocaleString()}`,
+                },
+              ],
+            };
+          }
         } else {
           // get_candlesticks
           console.error(
@@ -214,28 +293,171 @@ class OKXServer {
             throw new Error("No data returned from OKX API");
           }
 
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(
-                  response.data.data.map(
-                    ([time, open, high, low, close, vol, volCcy]) => ({
-                      timestamp: new Date(parseInt(time)).toISOString(),
-                      open,
-                      high,
-                      low,
-                      close,
-                      volume: vol,
-                      volumeCurrency: volCcy,
-                    })
-                  ),
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
+          // Process the candlestick data
+          const processedData = response.data.data.map(
+            ([time, open, high, low, close, vol, volCcy]) => ({
+              timestamp: new Date(parseInt(time)).toISOString(),
+              date: new Date(parseInt(time)).toLocaleString(),
+              open: parseFloat(open),
+              high: parseFloat(high),
+              low: parseFloat(low),
+              close: parseFloat(close),
+              change: (
+                ((parseFloat(close) - parseFloat(open)) / parseFloat(open)) *
+                100
+              ).toFixed(2),
+              volume: parseFloat(vol),
+              volumeCurrency: parseFloat(volCcy),
+            })
+          );
+
+          // Reverse for chronological order (oldest first)
+          const chronologicalData = [...processedData].reverse();
+
+          if (args.format === "json") {
+            // Original JSON format
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(processedData, null, 2),
+                },
+              ],
+            };
+          } else if (args.format === "table") {
+            // Table format (still markdown but formatted as a table)
+            let tableMarkdown = `# ${args.instrument} Candlestick Data (${
+              args.bar || "1m"
+            })\n\n`;
+            tableMarkdown +=
+              "| Time | Open | High | Low | Close | Change % | Volume |\n";
+            tableMarkdown +=
+              "|------|------|------|-----|-------|----------|--------|\n";
+
+            // Only show last 20 entries if there are too many to avoid huge tables
+            const displayData = chronologicalData.slice(-20);
+
+            displayData.forEach((candle) => {
+              const changeSymbol = parseFloat(candle.change) >= 0 ? "▲" : "▼";
+              tableMarkdown += `| ${candle.date} | $${candle.open.toFixed(
+                2
+              )} | $${candle.high.toFixed(2)} | $${candle.low.toFixed(
+                2
+              )} | $${candle.close.toFixed(2)} | ${changeSymbol} ${Math.abs(
+                parseFloat(candle.change)
+              ).toFixed(2)}% | ${candle.volume.toLocaleString()} |\n`;
+            });
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: tableMarkdown,
+                },
+              ],
+            };
+          } else {
+            // Enhanced markdown format with visualization
+            // Calculate some stats
+            const firstPrice = chronologicalData[0]?.open || 0;
+            const lastPrice =
+              chronologicalData[chronologicalData.length - 1]?.close || 0;
+            const overallChange = (
+              ((lastPrice - firstPrice) / firstPrice) *
+              100
+            ).toFixed(2);
+            const highestPrice = Math.max(
+              ...chronologicalData.map((c) => c.high)
+            );
+            const lowestPrice = Math.min(
+              ...chronologicalData.map((c) => c.low)
+            );
+
+            // Create a simple ASCII chart
+            const chartHeight = 10;
+            const priceRange = highestPrice - lowestPrice;
+
+            // Get a subset of data points for the chart (we'll use up to 40 points)
+            const step = Math.max(1, Math.floor(chronologicalData.length / 40));
+            const chartData = chronologicalData.filter(
+              (_, i) => i % step === 0
+            );
+
+            // Create the ASCII chart
+            let chart = "";
+            for (let row = 0; row < chartHeight; row++) {
+              const priceAtRow =
+                highestPrice - (row / (chartHeight - 1)) * priceRange;
+              // Price label on y-axis (right aligned)
+              chart += `${priceAtRow.toFixed(2).padStart(8)} |`;
+
+              // Plot the points
+              for (let i = 0; i < chartData.length; i++) {
+                const candle = chartData[i];
+                if (candle.high >= priceAtRow && candle.low <= priceAtRow) {
+                  // This price level is within this candle's range
+                  if (
+                    (priceAtRow <= candle.close && priceAtRow >= candle.open) ||
+                    (priceAtRow >= candle.close && priceAtRow <= candle.open)
+                  ) {
+                    chart += "█"; // Body of the candle
+                  } else {
+                    chart += "│"; // Wick of the candle
+                  }
+                } else {
+                  chart += " ";
+                }
+              }
+              chart += "\n";
+            }
+
+            // X-axis
+            chart += "         " + "‾".repeat(chartData.length) + "\n";
+
+            // Create the markdown with stats and chart
+            let markdownText = `# ${args.instrument} Candlestick Analysis (${
+              args.bar || "1m"
+            })\n\n`;
+            markdownText += `## Summary\n\n`;
+            markdownText += `- **Period:** ${chronologicalData[0].date} to ${
+              chronologicalData[chronologicalData.length - 1].date
+            }\n`;
+            markdownText += `- **Starting Price:** $${firstPrice.toLocaleString()}\n`;
+            markdownText += `- **Ending Price:** $${lastPrice.toLocaleString()}\n`;
+            markdownText += `- **Overall Change:** ${overallChange}%\n`;
+            markdownText += `- **Highest Price:** $${highestPrice.toLocaleString()}\n`;
+            markdownText += `- **Lowest Price:** $${lowestPrice.toLocaleString()}\n`;
+            markdownText += `- **Number of Candles:** ${chronologicalData.length}\n\n`;
+
+            markdownText += `## Price Chart\n\n`;
+            markdownText += "```\n" + chart + "```\n\n";
+
+            markdownText += `## Recent Price Action\n\n`;
+
+            // Add a table of the most recent 5 candles
+            markdownText += "| Time | Open | High | Low | Close | Change % |\n";
+            markdownText += "|------|------|------|-----|-------|----------|\n";
+
+            chronologicalData.slice(-5).forEach((candle) => {
+              const changeSymbol = parseFloat(candle.change) >= 0 ? "▲" : "▼";
+              markdownText += `| ${candle.date} | $${candle.open.toFixed(
+                2
+              )} | $${candle.high.toFixed(2)} | $${candle.low.toFixed(
+                2
+              )} | $${candle.close.toFixed(2)} | ${changeSymbol} ${Math.abs(
+                parseFloat(candle.change)
+              ).toFixed(2)}% |\n`;
+            });
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: markdownText,
+                },
+              ],
+            };
+          }
         }
       } catch (error: unknown) {
         if (error instanceof Error) {
