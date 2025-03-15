@@ -1,11 +1,14 @@
 # OKX MCP Server
 
-This project creates a Model Context Protocol (MCP) server that fetches real-time cryptocurrency data from the OKX exchange. It allows AI assistants like Claude to access up-to-date cryptocurrency price information and historical data through defined tools with enhanced visualization capabilities.
+This project creates a Model Context Protocol (MCP) server that fetches real-time cryptocurrency data from the OKX exchange. It allows AI assistants like Claude to access up-to-date cryptocurrency price information and historical data through defined tools with enhanced visualization capabilities and WebSocket live updates.
 
 ## Features
 
 - `get_price`: Fetches the latest price data for a cryptocurrency trading pair with visual formatting
 - `get_candlesticks`: Retrieves historical candlestick data with visualization options including ASCII charts
+- `subscribe_ticker`: Subscribes to real-time WebSocket updates for a trading pair
+- `get_live_ticker`: Retrieves the latest live data from WebSocket connection
+- `unsubscribe_ticker`: Stops receiving updates for a specific trading pair
 
 ## Prerequisites
 
@@ -29,13 +32,20 @@ This project creates a Model Context Protocol (MCP) server that fetches real-tim
    npm install
    ```
 
-3. Build the project
+3. Add the WebSocket dependency
+
+   ```bash
+   npm install ws
+   npm install --save-dev @types/ws
+   ```
+
+4. Build the project
 
    ```bash
    npm run build
    ```
 
-4. Make the compiled script executable
+5. Make the compiled script executable
    ```bash
    chmod +x build/index.js
    ```
@@ -68,6 +78,9 @@ In the inspector, you can test:
 
 - `get_price` with input: `{ "instrument": "BTC-USDT", "format": "markdown" }`
 - `get_candlesticks` with input: `{ "instrument": "BTC-USDT", "bar": "1m", "limit": 10, "format": "markdown" }`
+- `subscribe_ticker` with input: `{ "instrument": "BTC-USDT" }`
+- `get_live_ticker` with input: `{ "instrument": "BTC-USDT", "format": "markdown" }`
+- `unsubscribe_ticker` with input: `{ "instrument": "BTC-USDT" }`
 
 Each tool supports different visualization formats:
 
@@ -112,6 +125,9 @@ Once integrated, you can ask Claude:
 3. "Compare the current prices of BTC-USDT and ETH-USDT."
 4. "Analyze the most recent 20 candlesticks for SOL-USDT with 1-minute intervals and display them in a table format."
 5. "Is the current price of BTC-USDT higher or lower than its 24-hour high? Visualize the price range."
+6. "Subscribe to live updates for Bitcoin price and tell me when it changes."
+7. "Show me the latest real-time data for Ethereum."
+8. "Monitor BTC-USDT in real-time and alert me if the price moves by more than 1% in either direction."
 
 ## Data Visualization Features
 
@@ -134,6 +150,31 @@ The enhanced MCP server provides rich data visualization:
 
 - **get_price**: Supports `markdown` (default) or `json` formats
 - **get_candlesticks**: Supports `markdown` (default), `table`, or `json` formats
+- **get_live_ticker**: Supports `markdown` (default) or `json` formats
+
+## WebSocket Real-time Updates
+
+This server includes WebSocket support for receiving live data from OKX:
+
+### How WebSockets Work
+
+- Establishes a persistent connection to OKX's WebSocket API
+- Receives push updates whenever prices change
+- Maintains a cache of the latest data for each subscribed instrument
+- Automatically reconnects if the connection is lost
+
+### WebSocket Tools
+
+- **subscribe_ticker**: Starts a subscription for real-time ticker updates
+- **get_live_ticker**: Gets the latest data from active subscriptions
+- **unsubscribe_ticker**: Ends a subscription when monitoring is no longer needed
+
+### Use Cases for Real-time Updates
+
+- Monitoring price movements in real-time
+- Setting up price alerts
+- Tracking market volatility as it happens
+- Making informed trading decisions with the latest data
 
 ## Environment Variables (Optional)
 

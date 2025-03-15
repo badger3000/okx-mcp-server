@@ -8,6 +8,7 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
+import WebSocket from "ws";
 
 // Define OKX API Response Types
 interface OKXTickerResponse {
@@ -43,9 +44,199 @@ interface OKXCandlesticksResponse {
   >;
 }
 
+// WebSocket message types
+interface OKXWebSocketMessage {
+  arg: {
+    channel: string;
+    instId: string;
+  };
+  data: any[];
+}
+
+// WebSocket realtime data cache
+class OKXWebSocketClient {
+  private ws: WebSocket | null = null;
+  private subscriptions: Set<string> = new Set();
+  private dataCache: Map<string, any> = new Map();
+  private connectionAttempts: number = 0;
+  private maxConnectionAttempts: number = 5;
+  private reconnectDelay: number = 5000;
+  private pingInterval: NodeJS.Timeout | null = null;
+  private isConnecting: boolean = false;
+
+  constructor() {
+    this.connect();
+  }
+
+  private connect() {
+    if (this.isConnecting) return;
+    this.isConnecting = true;
+
+    if (this.connectionAttempts >= this.maxConnectionAttempts) {
+      console.error("[WebSocket] Max connection attempts reached. Giving up.");
+      return;
+    }
+
+    console.error(
+      `[WebSocket] Connecting to OKX (attempt ${this.connectionAttempts + 1}/${
+        this.maxConnectionAttempts
+      })...`
+    );
+
+    this.ws = new WebSocket("wss://ws.okx.com:8443/ws/v5/public");
+
+    this.ws.on("open", () => {
+      console.error("[WebSocket] Connected to OKX WebSocket");
+      this.connectionAttempts = 0;
+      this.isConnecting = false;
+      this.resubscribe();
+
+      // Set up ping interval to keep connection alive
+      if (this.pingInterval) clearInterval(this.pingInterval);
+      this.pingInterval = setInterval(() => this.ping(), 30000);
+    });
+
+    this.ws.on("message", (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+
+        // Handle ping response
+        if (message.event === "pong") {
+          return;
+        }
+
+        // Handle data updates
+        if (message.data && message.arg) {
+          const key = `${message.arg.channel}:${message.arg.instId}`;
+          this.dataCache.set(key, message.data);
+
+          console.error(`[WebSocket] Received update for ${key}`);
+        }
+      } catch (error) {
+        console.error("[WebSocket] Error parsing message:", error);
+      }
+    });
+
+    this.ws.on("error", (error) => {
+      console.error("[WebSocket] Error:", error);
+    });
+
+    this.ws.on("close", () => {
+      console.error("[WebSocket] Disconnected");
+      this.isConnecting = false;
+
+      if (this.pingInterval) {
+        clearInterval(this.pingInterval);
+        this.pingInterval = null;
+      }
+
+      this.connectionAttempts++;
+      setTimeout(() => this.connect(), this.reconnectDelay);
+    });
+  }
+
+  private ping() {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({op: "ping"}));
+    }
+  }
+
+  private resubscribe() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    for (const subscription of this.subscriptions) {
+      const [channel, instId] = subscription.split(":");
+      this.sendSubscription(channel, instId);
+      console.error(`[WebSocket] Resubscribed to ${channel} for ${instId}`);
+    }
+  }
+
+  private sendSubscription(channel: string, instId: string) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    this.ws.send(
+      JSON.stringify({
+        op: "subscribe",
+        args: [
+          {
+            channel,
+            instId,
+          },
+        ],
+      })
+    );
+  }
+
+  subscribe(channel: string, instId: string): void {
+    const key = `${channel}:${instId}`;
+
+    if (this.subscriptions.has(key)) {
+      return; // Already subscribed
+    }
+
+    console.error(`[WebSocket] Subscribing to ${channel} for ${instId}`);
+    this.subscriptions.add(key);
+
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.sendSubscription(channel, instId);
+    }
+  }
+
+  unsubscribe(channel: string, instId: string): void {
+    const key = `${channel}:${instId}`;
+
+    if (!this.subscriptions.has(key)) {
+      return; // Not subscribed
+    }
+
+    console.error(`[WebSocket] Unsubscribing from ${channel} for ${instId}`);
+    this.subscriptions.delete(key);
+
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(
+        JSON.stringify({
+          op: "unsubscribe",
+          args: [
+            {
+              channel,
+              instId,
+            },
+          ],
+        })
+      );
+    }
+  }
+
+  getLatestData(channel: string, instId: string): any | null {
+    const key = `${channel}:${instId}`;
+    return this.dataCache.get(key) || null;
+  }
+
+  isSubscribed(channel: string, instId: string): boolean {
+    const key = `${channel}:${instId}`;
+    return this.subscriptions.has(key);
+  }
+
+  close(): void {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+
+    if (this.ws) {
+      this.ws.terminate();
+      this.ws = null;
+    }
+
+    this.subscriptions.clear();
+    this.dataCache.clear();
+  }
+}
+
 class OKXServer {
   private server: Server;
   private axiosInstance;
+  private wsClient: OKXWebSocketClient;
 
   constructor() {
     console.error("[Setup] Initializing OKX MCP server...");
@@ -53,7 +244,7 @@ class OKXServer {
     this.server = new Server(
       {
         name: "okx-mcp-server",
-        version: "0.1.0",
+        version: "0.2.0",
       },
       {
         capabilities: {
@@ -71,13 +262,22 @@ class OKXServer {
       },
     });
 
+    // Initialize WebSocket client
+    this.wsClient = new OKXWebSocketClient();
+
     this.setupToolHandlers();
 
     this.server.onerror = (error) => console.error("[Error]", error);
     process.on("SIGINT", async () => {
-      await this.server.close();
+      await this.cleanup();
       process.exit(0);
     });
+  }
+
+  private async cleanup() {
+    console.error("[Cleanup] Shutting down...");
+    this.wsClient.close();
+    await this.server.close();
   }
 
   private setupToolHandlers() {
@@ -133,12 +333,69 @@ class OKXServer {
             required: ["instrument"],
           },
         },
+        {
+          name: "subscribe_ticker",
+          description:
+            "Subscribe to real-time ticker updates for an instrument",
+          inputSchema: {
+            type: "object",
+            properties: {
+              instrument: {
+                type: "string",
+                description: "Instrument ID (e.g. BTC-USDT)",
+              },
+            },
+            required: ["instrument"],
+          },
+        },
+        {
+          name: "get_live_ticker",
+          description: "Get the latest ticker data from WebSocket subscription",
+          inputSchema: {
+            type: "object",
+            properties: {
+              instrument: {
+                type: "string",
+                description: "Instrument ID (e.g. BTC-USDT)",
+              },
+              format: {
+                type: "string",
+                description: "Output format (json or markdown)",
+                default: "markdown",
+              },
+            },
+            required: ["instrument"],
+          },
+        },
+        {
+          name: "unsubscribe_ticker",
+          description:
+            "Unsubscribe from real-time ticker updates for an instrument",
+          inputSchema: {
+            type: "object",
+            properties: {
+              instrument: {
+                type: "string",
+                description: "Instrument ID (e.g. BTC-USDT)",
+              },
+            },
+            required: ["instrument"],
+          },
+        },
       ],
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
-        if (!["get_price", "get_candlesticks"].includes(request.params.name)) {
+        const validTools = [
+          "get_price",
+          "get_candlesticks",
+          "subscribe_ticker",
+          "get_live_ticker",
+          "unsubscribe_ticker",
+        ];
+
+        if (!validTools.includes(request.params.name)) {
           throw new McpError(
             ErrorCode.MethodNotFound,
             `Unknown tool: ${request.params.name}`
@@ -161,6 +418,143 @@ class OKXServer {
 
         // Default format to markdown if not specified
         args.format = args.format || "markdown";
+
+        // Handle WebSocket subscriptions
+        if (request.params.name === "subscribe_ticker") {
+          console.error(
+            `[WebSocket] Subscribing to ticker for ${args.instrument}`
+          );
+          this.wsClient.subscribe("tickers", args.instrument);
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Successfully subscribed to real-time ticker updates for ${args.instrument}. Use get_live_ticker to retrieve the latest data.`,
+              },
+            ],
+          };
+        }
+
+        // Handle WebSocket unsubscriptions
+        if (request.params.name === "unsubscribe_ticker") {
+          console.error(
+            `[WebSocket] Unsubscribing from ticker for ${args.instrument}`
+          );
+          this.wsClient.unsubscribe("tickers", args.instrument);
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Successfully unsubscribed from real-time ticker updates for ${args.instrument}.`,
+              },
+            ],
+          };
+        }
+
+        // Handle WebSocket data retrieval
+        if (request.params.name === "get_live_ticker") {
+          const isSubscribed = this.wsClient.isSubscribed(
+            "tickers",
+            args.instrument
+          );
+
+          if (!isSubscribed) {
+            console.error(
+              `[WebSocket] Auto-subscribing to ticker for ${args.instrument}`
+            );
+            this.wsClient.subscribe("tickers", args.instrument);
+
+            // Give it a moment to connect and receive data
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+
+          const tickerData = this.wsClient.getLatestData(
+            "tickers",
+            args.instrument
+          );
+
+          if (!tickerData || tickerData.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `No live data available yet for ${args.instrument}. If you just subscribed, please wait a moment and try again.`,
+                },
+              ],
+            };
+          }
+
+          const ticker = tickerData[0];
+
+          if (args.format === "json") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(ticker, null, 2),
+                },
+              ],
+            };
+          } else {
+            // Calculate change for markdown formatting
+            const last = parseFloat(ticker.last);
+            const open24h = parseFloat(ticker.open24h);
+            const priceChange = last - open24h;
+            const priceChangePercent = (priceChange / open24h) * 100;
+            const changeSymbol = priceChange >= 0 ? "▲" : "▼";
+
+            // Create price range visual
+            const low24h = parseFloat(ticker.low24h);
+            const high24h = parseFloat(ticker.high24h);
+            const range = high24h - low24h;
+            const position =
+              Math.min(Math.max((last - low24h) / range, 0), 1) * 100;
+
+            const priceBar = `Low ${low24h.toFixed(2)} [${"▮".repeat(
+              Math.floor(position / 5)
+            )}|${"▯".repeat(20 - Math.floor(position / 5))}] ${high24h.toFixed(
+              2
+            )} High`;
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `# ${args.instrument} Live Price Data\n\n` +
+                    `## Current Price: $${last.toLocaleString()}\n\n` +
+                    `**24h Change:** ${changeSymbol} $${Math.abs(
+                      priceChange
+                    ).toLocaleString()} (${
+                      priceChangePercent >= 0 ? "+" : ""
+                    }${priceChangePercent.toFixed(2)}%)\n\n` +
+                    `**Bid:** $${parseFloat(
+                      ticker.bidPx
+                    ).toLocaleString()} | **Ask:** $${parseFloat(
+                      ticker.askPx
+                    ).toLocaleString()}\n\n` +
+                    `### 24-Hour Price Range\n\n` +
+                    `\`\`\`\n${priceBar}\n\`\`\`\n\n` +
+                    `**24h High:** $${parseFloat(
+                      ticker.high24h
+                    ).toLocaleString()}\n` +
+                    `**24h Low:** $${parseFloat(
+                      ticker.low24h
+                    ).toLocaleString()}\n\n` +
+                    `**24h Volume:** ${parseFloat(
+                      ticker.vol24h
+                    ).toLocaleString()} units\n\n` +
+                    `**Last Updated:** ${new Date(
+                      parseInt(ticker.ts)
+                    ).toLocaleString()}\n\n` +
+                    `*Data source: Live WebSocket feed*`,
+                },
+              ],
+            };
+          }
+        }
 
         if (request.params.name === "get_price") {
           console.error(
@@ -261,12 +655,13 @@ class OKXServer {
                     ).toLocaleString()} units\n\n` +
                     `**Last Updated:** ${new Date(
                       parseInt(ticker.ts)
-                    ).toLocaleString()}`,
+                    ).toLocaleString()}\n\n` +
+                    `*Note: For real-time updates, use the subscribe_ticker and get_live_ticker tools.*`,
                 },
               ],
             };
           }
-        } else {
+        } else if (request.params.name === "get_candlesticks") {
           // get_candlesticks
           console.error(
             `[API] Fetching candlesticks for instrument: ${
@@ -449,6 +844,8 @@ class OKXServer {
               ).toFixed(2)}% |\n`;
             });
 
+            markdownText += `\n*Note: For real-time updates, use the WebSocket subscription tools.*`;
+
             return {
               content: [
                 {
@@ -459,6 +856,12 @@ class OKXServer {
             };
           }
         }
+
+        // This should never happen due to the check at the beginning
+        throw new McpError(
+          ErrorCode.MethodNotFound,
+          `Unknown tool: ${request.params.name}`
+        );
       } catch (error: unknown) {
         if (error instanceof Error) {
           console.error("[Error] Failed to fetch data:", error);
