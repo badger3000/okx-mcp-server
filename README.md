@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/badger3000-okx-mcp-server-badge.png)](https://mseep.ai/app/badger3000-okx-mcp-server)
+
 # OKX MCP Server
 
 This project creates a Model Context Protocol (MCP) server that fetches real-time cryptocurrency data from the OKX exchange. It allows AI assistants like Claude to access up-to-date cryptocurrency price information and historical data through defined tools with enhanced visualization capabilities and WebSocket live updates.
